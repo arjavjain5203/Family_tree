@@ -17,7 +17,7 @@ class Tree(Base):
     generation_limit = Column(Integer, default=4)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
-    owner = relationship("User", backref="owned_tree", lazy="joined")
+    owner = relationship("User", backref="owned_tree", lazy="selectin")
     members = relationship("Member", back_populates="tree", cascade="all, delete-orphan")
     access_list = relationship("TreeAccess", back_populates="tree", cascade="all, delete-orphan")
 

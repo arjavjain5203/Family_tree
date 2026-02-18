@@ -7,9 +7,11 @@ from app.services.member_service import MemberService
 from app.models.user import User
 from app.models.tree import Role
 from app.models.member import Gender
+from app.models.event import Event
 from twilio.twiml.messaging_response import MessagingResponse
 from app.utils.validators import validate_dob, validate_gender
 from datetime import date
+from collections import defaultdict
 
 logger = logging.getLogger(__name__)
 
@@ -74,7 +76,7 @@ class ChatbotService:
                     data['phone'] = phone # Validate?
                 await self.user_service.update_state(user.id, "ADD_MEMBER_RELATION", data)
                 # Fetch existing members to show options
-                tree = await self.tree_service.get_tree_by_owner(user.id)
+                tree, role = await self.tree_service.get_active_tree(user.id)
                 members = await self.member_service.get_members_by_tree(tree.id) if tree else []
                 
                 if not tree or not members:
@@ -122,12 +124,14 @@ class ChatbotService:
                         return str(response)
                     
                     # Validate generation limit
-                    tree = await self.tree_service.get_tree_by_owner(user.id)
-                    if new_gen < 1 or new_gen > tree.generation_limit:
-                        response.message(f"Cannot add member. Generation level {new_gen} exceeds limit or is invalid.")
-                        await self.user_service.clear_state(user.id)
-                        return str(response)
+                    # data['generation'] = new_gen (moved down)
                     
+                    # Validate generation - RESTRICTION REMOVED
+                    # if new_gen < 1: ...
+                    
+                    # Validate generation - RESTRICTION REMOVED
+                    # if new_gen < 1: ...
+
                     data['generation'] = new_gen
                     data['relationship_type'] = relationship_type
                     
@@ -141,18 +145,27 @@ class ChatbotService:
                  try:
                      member_id = int(body.strip())
                      # Check if member exists in user's tree
-                     tree = await self.tree_service.get_tree_by_owner(user.id)
+                     tree, role = await self.tree_service.get_active_tree(user.id)
+                     if not tree:
+                          response.message("Tree not found.")
+                          return str(response)
+                     
                      member = await self.member_service.get_member(member_id)
                      if not member or member.tree_id != tree.id:
                           response.message("Member not found in your tree.")
                           return str(response)
                      
+                     if role not in [Role.OWNER, Role.EDITOR]:
+                          response.message("Permission denied. Viewers cannot edit.")
+                          await self.user_service.clear_state(user.id)
+                          return str(response)
+                     
                      # Check locking
                      if await self.tree_service.is_member_locked(member_id):
                           if member.locked_by != user.id:
-                              response.message(f"Member is currently being edited by another user. Try again later.")
-                              await self.user_service.clear_state(user.id)
-                              return str(response)
+                               response.message(f"Member is currently being edited by another user. Try again later.")
+                               await self.user_service.clear_state(user.id)
+                               return str(response)
 
                      # Lock member
                      await self.member_service.lock_member(member_id, user.id)
@@ -201,17 +214,16 @@ class ChatbotService:
             # --- SHARE TREE FLOW ---
             elif state == "SHARE_ENTER_PHONE":
                  phone = body.strip()
-                 # Normalize
-                 # For now, just simplistic
-                 if not phone.startswith('+'): phone = '+' + phone # Assume
+                 if not phone.startswith('+'): phone = '+' + phone 
                  
                  target_user = await self.user_service.get_or_create_user(phone)
-                 tree = await self.tree_service.get_tree_by_owner(user.id)
-                 if tree:
+                 tree, role = await self.tree_service.get_active_tree(user.id)
+                 
+                 if tree and role == Role.OWNER:
                      await self.tree_service.grant_access(tree.id, target_user.id, Role.VIEWER)
                      response.message(f"✅ Access granted to {phone} as Viewer.")
                  else:
-                     response.message("You don't have a tree to share.")
+                     response.message("You do not have permission to share this tree.")
                  
                  await self.user_service.clear_state(user.id)
                  await self.show_main_menu(response)
@@ -222,16 +234,16 @@ class ChatbotService:
                  if not phone.startswith('+'): phone = '+' + phone
                  
                  target_user = await self.user_service.get_or_create_user(phone)
-                 tree = await self.tree_service.get_tree_by_owner(user.id)
+                 tree, role = await self.tree_service.get_active_tree(user.id)
                  
-                 if tree:
+                 if tree and role == Role.OWNER:
                      if target_user.id == user.id:
                           response.message("You already own this tree.")
                      else:
                           await self.tree_service.transfer_ownership(tree, target_user)
                           response.message(f"✅ Ownership transferred to {phone}. You are now an Editor.")
                  else:
-                     response.message("You don't have a tree to transfer.")
+                     response.message("You do not have permission to transfer ownership.")
                  
                  await self.user_service.clear_state(user.id)
                  await self.show_main_menu(response)
@@ -239,18 +251,87 @@ class ChatbotService:
             # --- DELETE TREE FLOW ---
             elif state == "DELETE_CONFIRM":
                  if body.lower() == "yes":
-                     tree = await self.tree_service.get_tree_by_owner(user.id)
-                     if tree:
+                     tree, role = await self.tree_service.get_active_tree(user.id)
+                     if tree and role == Role.OWNER:
                          await self.tree_service.delete_tree(tree)
                          response.message("✅ Tree deleted successfully.")
                      else:
-                         response.message("Tree not found.")
+                         response.message("Permission denied or tree not found.")
                  else:
                      response.message("Deletion cancelled.")
                  
                  await self.user_service.clear_state(user.id)
                  await self.show_main_menu(response)
 
+
+            # --- EVENT FLOW ---
+            elif state == "EVENT_SELECT_MEMBER":
+                 try:
+                     member_id = int(body.strip())
+                     tree, role = await self.tree_service.get_active_tree(user.id)
+                     if not tree:
+                          response.message("Tree not found.")
+                          return str(response)
+                     
+                     member = await self.member_service.get_member(member_id)
+                     if not member or member.tree_id != tree.id:
+                          response.message("Member not found in your tree.")
+                          return str(response)
+
+                     # Store selected member
+                     data['member_id'] = member_id
+                     await self.user_service.update_state(user.id, "EVENT_ACTION", data)
+                     response.message(f"Selected {member.name}. What would you like to do?\n1. Add Special Date\n2. View Special Dates")
+                 except ValueError:
+                      response.message("Invalid ID. Please enter a number.")
+
+            elif state == "EVENT_ACTION":
+                 choice = body.strip()
+                 if choice == "1":
+                      # Add Event
+                      tree, role = await self.tree_service.get_active_tree(user.id)
+                      if role not in [Role.OWNER, Role.EDITOR]:
+                           response.message("🔒 Only Owners and Editors can add events.")
+                           await self.user_service.clear_state(user.id)
+                           await self.show_main_menu(response)
+                           return str(response)
+
+                      await self.user_service.update_state(user.id, "EVENT_TYPE", data)
+                      response.message("Enter the Event Type (e.g. Birthday, Anniversary, Death Anniversary):")
+                 elif choice == "2":
+                      # View Events
+                      member_id = data['member_id']
+                      events = await self.member_service.get_events(member_id)
+                      if not events:
+                           response.message("No special dates found for this member.")
+                      else:
+                           msg = "*Special Dates:*\n"
+                           for e in events:
+                                msg += f"📅 {e.event_date.strftime('%d-%m-%Y')}: {e.event_type}\n"
+                           response.message(msg)
+                      
+                      await self.user_service.clear_state(user.id)
+                      await self.show_main_menu(response)
+                 else:
+                      response.message("Invalid choice. Enter 1 or 2.")
+            
+            elif state == "EVENT_TYPE":
+                 data['event_type'] = body.strip()
+                 await self.user_service.update_state(user.id, "EVENT_DATE", data)
+                 response.message("Enter the Date (DD-MM-YYYY):")
+
+            elif state == "EVENT_DATE":
+                 try:
+                      event_date = validate_dob(body) # Reuse DOB validator for date format
+                      member_id = data['member_id']
+                      event_type = data['event_type']
+                      
+                      await self.member_service.add_event(member_id, event_type, event_date)
+                      response.message(f"✅ Added {event_type} on {event_date.strftime('%d-%m-%Y')}!")
+                      await self.user_service.clear_state(user.id)
+                      await self.show_main_menu(response)
+                 except ValueError as e:
+                      response.message(str(e))
 
         except Exception as e:
             import traceback
@@ -271,25 +352,29 @@ class ChatbotService:
             "4. 📤 Share Tree\n"
             "5. 🔄 Transfer Ownership\n"
             "6. 🗑 Delete Tree\n"
-            "7. ℹ️ Help"
+            "7. ℹ️ Help\n"
+            "8. 📅 Manage Events"
         )
 
     async def handle_main_menu(self, user: User, body: str, response: MessagingResponse):
         choice = body.strip()
+        tree, role = await self.tree_service.get_active_tree(user.id)
+
         if choice == "1":
-            tree = await self.tree_service.get_tree_by_owner(user.id)
             if not tree:
                  response.message("You don't have a tree yet. Select 'Add Member' to start!")
             else:
                 members = await self.member_service.get_members_by_tree(tree.id)
-                msg = f"🌳 *Your Family Tree* ({len(members)} members)\n\n"
-                for m in members:
-                     msg += f"• {m.name} ({m.gender}), Gen {m.generation_level}\n"
-                response.message(msg)
+                relationships = await self.member_service.get_relationships_by_tree(tree.id)
+                tree_text = self._build_tree_text(members, relationships)
+                response.message(tree_text)
                 
         elif choice == "2":
-            # Check if tree exists, if not, create
-            tree = await self.tree_service.get_tree_by_owner(user.id)
+            # Add Member
+            if tree and role not in [Role.OWNER, Role.EDITOR]:
+                response.message("🔒 You are a Viewer. You cannot add members.")
+                return
+
             if not tree:
                 tree = await self.tree_service.create_tree(user)
                 
@@ -297,10 +382,18 @@ class ChatbotService:
             response.message("Enter the name of the new member:")
             
         elif choice == "3":
-             tree = await self.tree_service.get_tree_by_owner(user.id)
+             # Edit Member
+             if not tree:
+                  response.message("No tree found.")
+                  return
+             
+             if role not in [Role.OWNER, Role.EDITOR]:
+                  response.message("🔒 You are a Viewer. You cannot edit members.")
+                  return
+
              members = await self.member_service.get_members_by_tree(tree.id) if tree else []
              
-             if not tree or not members:
+             if not members:
                   response.message("No members to edit.")
              else:
                   msg = "Enter the ID of the member to edit:\n"
@@ -313,44 +406,64 @@ class ChatbotService:
              response.message("Send 'reset' anytime to return to the main menu.")
         
         else:
-             # Make sure to handle other choices or ignore
              if choice == "4":
                  # Share Tree
-                 tree = await self.tree_service.get_tree_by_owner(user.id)
                  if not tree:
                       response.message("You do not own a tree to share.")
-                  # Only owner/editor can share? Requirement says "Editors cannot share access".
-                  # So check role logic if needed, but get_tree_by_owner implies ownership.
+                 elif role != Role.OWNER:
+                      response.message("🔒 Only the Owner can share the tree.")
                  else:
                       await self.user_service.update_state(user.id, "SHARE_ENTER_PHONE")
                       response.message("Enter the phone number to share with (e.g. +1234567890):")
 
              elif choice == "5":
                  # Transfer
-                 tree = await self.tree_service.get_tree_by_owner(user.id)
                  if not tree:
                       response.message("You do not own a tree.")
+                 elif role != Role.OWNER:
+                      response.message("🔒 Only the Owner can transfer ownership.")
                  else:
                       await self.user_service.update_state(user.id, "TRANSFER_ENTER_PHONE")
                       response.message("Enter the phone number of the new owner:")
 
              elif choice == "6":
                  # Delete
-                 tree = await self.tree_service.get_tree_by_owner(user.id)
                  if not tree:
                       response.message("You do not own a tree.")
+                 elif role != Role.OWNER:
+                      response.message("🔒 Only the Owner can delete the tree.")
                  else:
                       await self.user_service.update_state(user.id, "DELETE_CONFIRM")
                       response.message("Are you sure you want to delete your tree? This cannot be undone. Reply 'yes' to confirm.")
-             
+              
+             elif choice == "8":
+                  # Manage Events
+                  if not tree:
+                       response.message("No tree found.")
+                  else:
+                       members = await self.member_service.get_members_by_tree(tree.id)
+                       if not members:
+                            response.message("No members found. Add members first.")
+                       else:
+                            msg = "Select a member to manage events for:\n"
+                            for m in members:
+                                 msg += f"{m.id}. {m.name}\n"
+                            response.message(msg)
+                            await self.user_service.update_state(user.id, "EVENT_SELECT_MEMBER")
+
              elif body.lower() in ["hi", "hello", "menu", "start"]:
-                 await self.show_main_menu(response)
+                  await self.show_main_menu(response)
              else:
-                 response.message("Invalid option. Send 'menu' to see options.")
+                  response.message("Invalid option. Send 'menu' to see options.")
 
     async def finalize_add_member(self, user, data, response, is_root=False):
          user_id = user.id
-         tree = await self.tree_service.get_tree_by_owner(user_id)
+         tree, role = await self.tree_service.get_active_tree(user_id)
+         if not tree or role not in [Role.OWNER, Role.EDITOR]:
+              response.message("Permission denied.")
+              await self.user_service.clear_state(user_id)
+              return
+
          tree_id = tree.id
          try:
              # Create member
@@ -367,18 +480,6 @@ class ChatbotService:
              
              if not is_root and 'relative_id' in data:
                   # Add relationship
-                  # If Child -> Relative is Parent
-                  # If Parent -> Relative is Child
-                  # If Spouse -> No parent/child strict relation in 'relationships' table as defined?
-                  # User schema has Relationships(parent_id, child_id)
-                  # If spouse, we might not track it in Relationships table based on schema provided (only parent-child)
-                  # or we treat it differently. The schema said "Relatonships: parent_id, child_id".
-                  # So we only store parent-child. Spouses are implicit or need another table?
-                  # Requirement: "Relationships tree_id, parent_id, child_id".
-                  # So we only track lineage.
-                  # Requirement: "If user adds spouse, we just add member at same generation?".
-                  # Validating generation is done.
-                  
                   relative_id = data['relative_id']
                   rel_type = data['relationship_type']
                   
@@ -395,3 +496,57 @@ class ChatbotService:
          except Exception as e:
              response.message(f"❌ Failed to add member: {str(e)}")
              await self.user_service.clear_state(user_id)
+
+    def _build_tree_text(self, members, relationships) -> str:
+        if not members:
+            return "Tree is empty."
+            
+        member_map = {m.id: m for m in members}
+        children_map = defaultdict(list)
+        child_ids = set()
+        
+        for r in relationships:
+            children_map[r.parent_id].append(r.child_id)
+            child_ids.add(r.child_id)
+            
+        # identifying roots (members who are not children of anyone in this tree)
+        roots = [m for m in members if m.id not in child_ids]
+        # Sort roots by generation (usually 1) and ID
+        roots.sort(key=lambda m: (m.generation_level, m.id))
+        
+        output = [f"🌳 *Your Family Tree* ({len(members)} members)\n"]
+        
+        def print_tree(member_id, prefix, is_last):
+            member = member_map.get(member_id)
+            if not member: return
+            
+            connector = "└── " if is_last else "├── "
+            gender_symbol = "M" if "male" in str(member.gender).lower() else "F" if "female" in str(member.gender).lower() else "O"
+            
+            line = f"{prefix}{connector}{member.name} ({gender_symbol}), Gen {member.generation_level}"
+            output.append(line)
+            
+            children = children_map.get(member_id, [])
+            # Sort children by DOB
+            children.sort(key=lambda cid: member_map[cid].dob if member_map.get(cid) and member_map[cid].dob else date.max)
+            
+            new_prefix = prefix + ("    " if is_last else "│   ")
+            for i, child_id in enumerate(children):
+                print_tree(child_id, new_prefix, i == len(children) - 1)
+
+        for i, root in enumerate(roots):
+            member = root
+            gender_symbol = "M" if "male" in str(member.gender).lower() else "F" if "female" in str(member.gender).lower() else "O"
+            line = f"{member.name} ({gender_symbol}), Gen {member.generation_level}"
+            output.append(line)
+            
+            children = children_map.get(member.id, [])
+            children.sort(key=lambda cid: member_map[cid].dob if member_map.get(cid) and member_map[cid].dob else date.max)
+            
+            for j, child_id in enumerate(children):
+                 print_tree(child_id, "", j == len(children) - 1)
+                 
+            if i < len(roots) - 1:
+                output.append("") # Separator between trees
+
+        return "\n".join(output)

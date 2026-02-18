@@ -4,7 +4,7 @@ from sqlalchemy.orm import selectinload
 from app.models.tree import Tree, TreeAccess, Role
 from app.models.user import User
 from app.models.member import Member, Relationship
-from typing import Optional, List
+from typing import Optional, List, Tuple
 from datetime import datetime
 
 class TreeService:
@@ -38,6 +38,28 @@ class TreeService:
             .options(selectinload(Tree.members))
         )
          return result.scalars().first()
+
+    async def get_active_tree(self, user_id: int) -> Tuple[Optional[Tree], Optional[Role]]:
+        """
+        Get the tree that the user either owns or has access to (viewer/editor).
+        Returns (Tree, Role) or (None, None).
+        """
+        # 1. Check owned
+        owned = await self.get_tree_by_owner(user_id)
+        if owned:
+             return owned, Role.OWNER
+        
+        # 2. Check shared
+        result = await self.db.execute(
+            select(TreeAccess)
+            .filter(TreeAccess.user_id == user_id)
+            .options(selectinload(TreeAccess.tree).selectinload(Tree.members))
+        )
+        access = result.scalars().first()
+        if access:
+             return access.tree, access.role
+             
+        return None, None
 
     async def grant_access(self, tree_id: int, user_id: int, role: Role = Role.VIEWER):
         # Check if access already exists

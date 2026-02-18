@@ -33,6 +33,8 @@ class Member(Base):
     children_relationships = relationship("Relationship", foreign_keys="Relationship.parent_id", back_populates="parent", cascade="all, delete-orphan")
     # relationships where this member is the child
     parent_relationships = relationship("Relationship", foreign_keys="Relationship.child_id", back_populates="child", cascade="all, delete-orphan")
+    
+    events = relationship("Event", back_populates="member", cascade="all, delete-orphan")
 
 class Relationship(Base):
     __tablename__ = "relationships"

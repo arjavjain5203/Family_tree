@@ -18,6 +18,7 @@ from app.config import get_settings
 from app.models.user import User
 from app.models.tree import Tree, TreeAccess
 from app.models.member import Member, Relationship
+from app.models.event import Event
 
 # Use SQLite for testing
 SQLALCHEMY_DATABASE_URL = "sqlite+aiosqlite:///./test.db"
@@ -26,7 +27,7 @@ engine = create_async_engine(
     SQLALCHEMY_DATABASE_URL, connect_args={"check_same_thread": False}
 )
 TestingSessionLocal = sessionmaker(
-    class_=AsyncSession, autocommit=False, autoflush=False, bind=engine
+    class_=AsyncSession, autocommit=False, autoflush=False, bind=engine, expire_on_commit=False
 )
 
 async def override_get_db():

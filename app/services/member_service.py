@@ -1,6 +1,7 @@
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from app.models.member import Member, Relationship, Gender
+from app.models.event import Event
 from typing import Optional, List
 from datetime import date, datetime, timedelta
 from app.models.tree import Tree
@@ -15,6 +16,10 @@ class MemberService:
     
     async def get_members_by_tree(self, tree_id: int) -> List[Member]:
         result = await self.db.execute(select(Member).filter(Member.tree_id == tree_id))
+        return result.scalars().all()
+
+    async def get_relationships_by_tree(self, tree_id: int) -> List[Relationship]:
+        result = await self.db.execute(select(Relationship).filter(Relationship.tree_id == tree_id))
         return result.scalars().all()
 
     async def create_member(
@@ -82,3 +87,22 @@ class MemberService:
     async def get_member_by_phone(self, phone: str) -> Optional[Member]:
         result = await self.db.execute(select(Member).filter(Member.phone == phone))
         return result.scalars().first()
+
+    async def add_event(self, member_id: int, event_type: str, event_date: date, description: str = None) -> Event:
+        event = Event(
+            member_id=member_id,
+            event_type=event_type,
+            event_date=event_date,
+            description=description
+        )
+        self.db.add(event)
+        await self.db.commit()
+        await self.db.refresh(event)
+        return event
+
+    async def get_events(self, member_id: int) -> List[Event]:
+        # Using execute/scalars for consistency with other methods, though could use relationship lazy loading if instance available
+        result = await self.db.execute(
+            select(Event).filter(Event.member_id == member_id).order_by(Event.event_date)
+        )
+        return result.scalars().all()
