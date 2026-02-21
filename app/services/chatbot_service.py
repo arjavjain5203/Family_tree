@@ -440,6 +440,8 @@ class ChatbotService:
                 relationships = await self.member_service.get_relationships_by_tree(tree.id)
                 tree_text = self._build_tree_text(members, relationships)
                 response.message(tree_text)
+            
+            await self.show_main_menu(response)
                 
         elif choice == "2":
             # Add Member
@@ -476,14 +478,17 @@ class ChatbotService:
              
         elif choice == "7":
              response.message("Send 'reset' anytime to return to the main menu.")
+             await self.show_main_menu(response)
         
         else:
              if choice == "4":
                  # Share Tree
                  if not tree:
                       response.message("You do not own a tree to share.")
+                      await self.show_main_menu(response)
                  elif role != Role.OWNER:
                       response.message("🔒 Only the Owner can share the tree.")
+                      await self.show_main_menu(response)
                  else:
                       await self.user_service.update_state(user.id, "SHARE_ENTER_PHONE")
                       response.message("Enter the phone number to share with (e.g. +1234567890):")
@@ -492,8 +497,10 @@ class ChatbotService:
                  # Transfer
                  if not tree:
                       response.message("You do not own a tree.")
+                      await self.show_main_menu(response)
                  elif role != Role.OWNER:
                       response.message("🔒 Only the Owner can transfer ownership.")
+                      await self.show_main_menu(response)
                  else:
                       await self.user_service.update_state(user.id, "TRANSFER_ENTER_PHONE")
                       response.message("Enter the phone number of the new owner:")
@@ -502,8 +509,10 @@ class ChatbotService:
                  # Delete
                  if not tree:
                       response.message("You do not own a tree.")
+                      await self.show_main_menu(response)
                  elif role != Role.OWNER:
                       response.message("🔒 Only the Owner can delete the tree.")
+                      await self.show_main_menu(response)
                  else:
                       await self.user_service.update_state(user.id, "DELETE_CONFIRM")
                       response.message("Are you sure you want to delete your tree? This cannot be undone. Reply 'yes' to confirm.")
